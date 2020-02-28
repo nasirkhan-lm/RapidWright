@@ -12,8 +12,14 @@ sourceSets {
   }
 }
 
+repositories {
+  mavenCentral()
+}
+
 dependencies {
   compile fileTree(dir: 'jars', include: ['*.jar'])
 
+  // https://mvnrepository.com/artifact/guru.nidi/graphviz-java
+  compile group: 'guru.nidi', name: 'graphviz-java', version: '0.14.2'
 }
 
