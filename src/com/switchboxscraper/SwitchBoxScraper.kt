@@ -1,9 +1,9 @@
 package com.switchboxscraper
 
+
 import com.xilinx.rapidwright.device.Device
 import com.xilinx.rapidwright.device.Tile
 import com.xilinx.rapidwright.device.Wire
-
 import guru.nidi.graphviz.attribute.Color
 import guru.nidi.graphviz.attribute.Label
 import guru.nidi.graphviz.attribute.Shape
@@ -12,12 +12,13 @@ import guru.nidi.graphviz.engine.Format
 import guru.nidi.graphviz.engine.Graphviz
 import guru.nidi.graphviz.model.Factory.mutGraph
 import guru.nidi.graphviz.model.Factory.mutNode
+import guru.nidi.graphviz.model.LinkSource
+import guru.nidi.graphviz.model.LinkTarget
 import guru.nidi.graphviz.model.MutableGraph
 import guru.nidi.graphviz.model.MutableNode
-
-
 import java.io.File
 import java.util.*
+
 
 enum class PJClass {
     CLK,
@@ -38,11 +39,13 @@ enum class PJRoutingType {
     INTERNAL
 }
 
-class PJProperty {
-    var pjClass = PJClass.CLK
-    var routingType = PJRoutingType.GLOBAL
-    var pjType = PJType.SOURCE
-}
+enum class GlobalRouteDir { EE, WW, SS, NN, NE, NW, SE, SW, INVALID }
+
+data class GRJunctionType(val dir: GlobalRouteDir, val type: PJType)
+
+data class PJProperty(val pjClass: PJClass, val pjType: PJType, val routingType: PJRoutingType)
+
+data class PIPGraphNode (val pip : Wire, val node : MutableNode)
 
 class Interconnect(tile: Tile) {
     var pipJunctions = mutableSetOf<Wire>()
@@ -58,7 +61,7 @@ class Interconnect(tile: Tile) {
         pipJunctions.fold(pjClassification) { acc, pj -> acc[pj] = classifyPJ(pj); acc }
     }
 
-    fun getPJClass(wire: Wire): PJClass {
+    private fun getPJClass(wire: Wire): PJClass {
         val wn = wire.wireName
         when {
             wn.contains("CLK") -> return PJClass.CLK
@@ -69,7 +72,7 @@ class Interconnect(tile: Tile) {
 
     fun pjOfClass(t: PJClass) = pipJunctions.filter { pj -> getPJClass(pj) == t }
 
-    fun getPJType(pj: Wire): PJType {
+    private fun getPJType(pj: Wire): PJType {
         val bkPips = pj.backwardPIPs
         val fwPips = pj.forwardPIPs
         when {
@@ -82,39 +85,27 @@ class Interconnect(tile: Tile) {
         return PJType.SOURCE
     }
 
-    fun getPJRoutingType(pj: Wire): PJRoutingType {
-        return PJRoutingType.GLOBAL
-    }
+    private fun getPJRoutingType(pj: Wire) = PJRoutingType.GLOBAL
 
-    fun classifyPJ(pj: Wire): PJProperty {
-        var prop = PJProperty()
-        prop.pjClass = getPJClass(pj)
-        prop.pjType = getPJType(pj)
-        prop.routingType = getPJRoutingType(pj)
-        return prop
-    }
+    private fun classifyPJ(pj: Wire) = PJProperty(getPJClass(pj), getPJType(pj), getPJRoutingType(pj))
 }
 
-class SwitchBoxScraper {
-    var device: Device
+class SwitchBoxScraper(deviceName: String) {
+    var device: Device = Device.getDevice(deviceName)
     var interconnects = mutableListOf<Interconnect>()
-
-    constructor(deviceName: String) {
-        device = Device.getDevice(deviceName)
-    }
 
     fun scrape(tiles: List<String>) {
         tiles.map { name -> println("Scraping Switchox: ${name}"); interconnects.add(Interconnect(device.getTile(name))) }
 
-        val graphTypes = listOf(EnumSet.of(PJClass.ELEC), EnumSet.of(PJClass.ROUTING), EnumSet.of(PJClass.CLK), EnumSet.allOf(PJClass::class.java))
-        var dotFiles = graphTypes.fold(mutableListOf<String>()) { files, type -> files.add(createDotGraph(type)); files }
+        val graphTypes = listOf(EnumSet.of(PJClass.ROUTING), EnumSet.of(PJClass.CLK), EnumSet.allOf(PJClass::class.java))
+        val dotFiles = graphTypes.fold(mutableListOf<String>()) { files, type -> files.add(createDotGraph(type)); files }
 
         println("Wrote files:")
         (dotFiles + dotsToSvg(dotFiles)).map { v -> println("\t${v}") }
     }
 
-    fun createPJGraphNode(ic: Interconnect, wire: Wire): MutableNode {
-        var node = mutNode(wire.wireName)
+    private fun createPJGraphNode(ic: Interconnect, wire: Wire): MutableNode {
+        val node = mutNode(wire.wireName)
         val prop = ic.pjClassification[wire]
         // Color classification by PIP junction class
         when (prop?.pjClass) {
@@ -132,49 +123,118 @@ class SwitchBoxScraper {
         return node
     }
 
-    fun dotsToSvg(files: List<String>): List<String> {
-        files.map { f -> Runtime.getRuntime().exec("dot -Ksfdp -Tsvg -Goverlap=scale -O ${f}") }
+    private fun dotsToSvg(files: List<String>): List<String> {
+        files.map { f -> Runtime.getRuntime().exec("dot -Kfdp -Goverlap=scale -Gsplines=line -Tsvg -O ${f}") }
         return files.map { file -> file + ".svg" }
     }
 
-    fun createDotGraph(includes: EnumSet<PJClass>): String {
-        val includeString = includes.fold("") { str, v -> str + v }
-        println("\tCreating graph for PIPs of type(s): ${includeString}")
+    private fun clusterPIPGraphNode(icNode: PIPGraphNode, clusters: MutableMap<GRJunctionType, MutableList<PIPGraphNode>>) {
+        var dir = GlobalRouteDir.EE
+        var type = PJType.SOURCE
+        val wn = icNode.pip.wireName
 
-        // For each switchbox, create graph nodes for each pip junction class selected for this graph
-        var interconnectNodes = interconnects.fold(mutableMapOf<Interconnect, Map<Wire, MutableNode>>()) { acc, ic ->
-            acc[ic] = ic.pipJunctions.filter { pj -> ic.pjClassification[pj]?.pjClass in includes }.fold(mutableMapOf<Wire, MutableNode>()) { acc2, pj ->
-                acc2[pj] = createPJGraphNode(ic, pj); acc2
-            }
-            acc
+        // Deduce direction
+        when {
+            wn.startsWith("EE") -> dir = GlobalRouteDir.EE
+            wn.startsWith("NN") -> dir = GlobalRouteDir.NN
+            wn.startsWith("SS") -> dir = GlobalRouteDir.SS
+            wn.startsWith("WW") -> dir = GlobalRouteDir.WW
+            wn.startsWith("NE") -> dir = GlobalRouteDir.NE
+            wn.startsWith("NW") -> dir = GlobalRouteDir.NW
+            wn.startsWith("SE") -> dir = GlobalRouteDir.SE
+            wn.startsWith("SW") -> dir = GlobalRouteDir.SW
+            else -> dir = GlobalRouteDir.INVALID
         }
 
-        // Create directed links between all created graph nodes and their destination (Forward) PIPs also present in
-        // the graph.
-        interconnectNodes.map { intcNodes ->
-            intcNodes.value.map { pjn ->
-                pjn.key.forwardPIPs.filter { pip -> intcNodes.value.containsKey(pip.endWire) }.map { pip -> pjn.value.addLink(intcNodes.value[pip.endWire]) }
-            }
+        // Deduce type
+        when {
+            wn.contains("BEG") -> type = PJType.SINK
+            wn.contains("END") -> type = PJType.SOURCE
+            else -> PJType.INTERNAL // unhandled
         }
 
-        // Create graphs and add all created nodes,
-        var interconnectGraphs = mutableListOf<MutableGraph>()
-        interconnectNodes.map{ intcNodes ->
-            var g = mutGraph(intcNodes.key.name)
+        val grjType = GRJunctionType(dir, type)
+        if(!clusters.containsKey(grjType))
+            clusters.put(grjType, mutableListOf<PIPGraphNode>())
+
+        clusters[grjType]?.add(icNode)
+
+    }
+
+    private fun createInterconnectGraph(ic: Interconnect, includes: EnumSet<PJClass>): MutableGraph {
+        // Create graph nodes for each pip junction class selected for this graph
+        val icNodes = ic.pipJunctions
+                .filter { pj -> ic.pjClassification[pj]?.pjClass in includes }
+                .fold(mutableMapOf<Wire, MutableNode>()) { acc2, pj ->
+                    acc2[pj] = createPJGraphNode(ic, pj); acc2
+                }
+
+        // Cluster interconnect based on inferred position in the switchbox
+        val nodeClusters = mutableMapOf<GRJunctionType, MutableList<PIPGraphNode>>()
+        icNodes.map { icNode ->
+            var node = PIPGraphNode(icNode.key, icNode.value)
+            clusterPIPGraphNode(node, nodeClusters) }
+
+
+        // Create graphs for each cluster
+        var clusterGraphs = mutableMapOf<GRJunctionType, MutableGraph>()
+        nodeClusters.map {
+            val clusterName = ic.name + " " + it.key.toString()
+            val g = mutGraph(clusterName)
                     .setDirected(true)
                     .setCluster(true)
                     .nodeAttrs()
                     .add(Style.FILLED)
                     .graphAttrs().add(Color.RED)
-                    .graphAttrs().add(Label.of(intcNodes.key.name))
-            intcNodes.value.map { node -> g.add(node.value) }
-            interconnectGraphs.add(g)
+                    .graphAttrs().add(Label.of(clusterName))
+            it.value.map { pipGraphNode -> g.add(pipGraphNode.node) }
+            clusterGraphs[it.key] = g
         }
 
+        // Add all clusters to a top-level graph of this interconnect
+        val parentGraph = mutGraph(ic.name)
+                .setDirected(true)
+                .setCluster(true)
+                .graphAttrs().add(Color.RED)
+                .graphAttrs().add(Label.of(ic.name))
+        clusterGraphs.map { it.value.addTo(parentGraph) }
+
+        // Create directed links between all created graph nodes and their destination (Forward) PIPs also present in
+        // the graph.
+        icNodes.map { pjn ->
+            // @note: This is a bit hacky;
+            // The links must be explicitely added to the parent graph instead of adding links to the nodes themselves.
+            // It has been found, that if links are created on the nodes themselves, this will merge the linked nodes
+            // into the subgraph which a node is included in. As a result, duplicate nodes will exist in the graph.
+            // To circumvent this, for each connection, we create a pair of nodes equally named with the actual nodes
+            // in the graph. As such, when adding a link between these nodes to the parent graph, the link will be
+            // defined in the parent graph instead of within the subgraph, avoiding node duplication.
+            val from = mutNode(pjn.value.name()) // Copy node name
+            pjn.key.forwardPIPs
+                    .filter { pip -> icNodes.containsKey(pip.endWire) }
+                    .map {
+                        val to =  mutNode(icNodes[it.endWire]?.name()) // Copy node name
+                        from.links().add(from.linkTo(to as LinkTarget))
+                    }
+            parentGraph.add(from)
+        }
+
+        return parentGraph
+    }
+
+    private fun createDotGraph(includes: EnumSet<PJClass>): String {
+        val includeString = includes.fold("") { str, v -> str + v }
+        println("\tCreating graph for PIPs of type(s): ${includeString}")
+
+        // For each switchbox, create graph nodes for each pip junction class selected for this graph
+        val icGraphs = interconnects.fold(mutableMapOf<Interconnect, MutableGraph>()) { acc, ic ->
+            acc[ic] = createInterconnectGraph(ic, includes)
+            acc
+        }
 
         // Add all Interconnect graphs to a single graph and write the graph
-        var parentGraph = mutGraph("Parent").setDirected(true)
-        interconnectGraphs.map { ig -> ig.addTo(parentGraph) }
+        val parentGraph = mutGraph("Parent").setDirected(true)
+        icGraphs.map { it.value.addTo(parentGraph) }
 
         val fileName = "graphs/sb_${includeString}.dot"
         return Graphviz.fromGraph(parentGraph).render(Format.DOT).toFile(File(fileName)).absolutePath
