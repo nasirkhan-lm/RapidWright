@@ -51,8 +51,6 @@ class Interconnect(tile: Tile) {
         }
     }
 
-    fun pjOfClass(t: PJClass) = pipJunctions.filter { pj -> getPJClass(pj) == t }
-
     private fun getPJType(pj: Wire): PJType {
         val bkPips = pj.backwardPIPs
         val fwPips = pj.forwardPIPs
