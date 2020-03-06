@@ -30,6 +30,8 @@ data class GRJunctionType(val dir: GlobalRouteDir, val type: PJType)
 
 data class PJProperty(val pjClass: PJClass, val pjType: PJType, val routingType: PJRoutingType)
 
+data class InterconnectResources(val pipJunctions : Set<Wire>, val clusters : Map<GRJunctionType, Set<Wire>>)
+
 class Interconnect(tile: Tile) {
     var pipJunctions = mutableSetOf<Wire>()
     var pjClassification = mutableMapOf<Wire, PJProperty>()
@@ -42,6 +44,60 @@ class Interconnect(tile: Tile) {
         tile.getPIPs().fold(pipJunctions) { junctions, pip -> junctions.addAll(listOf(pip.startWire, pip.endWire)); junctions }
         // Perform PIP junction classification
         pipJunctions.fold(pjClassification) { acc, pj -> acc[pj] = classifyPJ(pj); acc }
+    }
+
+    fun filterQuery(query: GraphQuery) : InterconnectResources {
+        var pipJunctions = pipJunctions.toMutableSet()  // Copy PIP junctions of the interconnect
+
+        // Cluster PIP Junctions based on inferred position in the switch box
+        var pipJunctionClusters = mutableMapOf<GRJunctionType, MutableSet<Wire>>()
+        pipJunctions.map { clusterPIPJunction(it, pipJunctionClusters) }
+
+        // Remove any excluded clusters and the PIP junctions of these clusters in our list of pip junctions included
+        // in this graph
+        val excludedClusters = pipJunctionClusters.filter { it.key in query.excludes }
+        var excludedNodes = excludedClusters.entries.fold(mutableListOf<Wire>()) { nodes, excludedCluster ->
+            excludedCluster.value.map {nodes.add(it) }; nodes
+        }
+        pipJunctions.removeAll { it in excludedNodes }
+        pipJunctionClusters.keys.removeAll { it in excludedClusters.keys }
+
+        return InterconnectResources(pipJunctions, pipJunctionClusters)
+    }
+
+    private fun clusterPIPJunction(pj: Wire, clusters: MutableMap<GRJunctionType, MutableSet<Wire>>) {
+        var dir : GlobalRouteDir
+        var type = PJType.UNCLASSIFIED
+        val wn = pj.wireName
+
+        // Deduce direction
+        dir = when {
+            wn.startsWith("EE") -> GlobalRouteDir.EE
+            wn.startsWith("NN") -> GlobalRouteDir.NN
+            wn.startsWith("SS") -> GlobalRouteDir.SS
+            wn.startsWith("WW") -> GlobalRouteDir.WW
+            wn.startsWith("NE") -> GlobalRouteDir.NE
+            wn.startsWith("NW") -> GlobalRouteDir.NW
+            wn.startsWith("SE") -> GlobalRouteDir.SE
+            wn.startsWith("SW") -> GlobalRouteDir.SW
+            else -> GlobalRouteDir.UNCLASSIFIED
+        }
+
+        if(dir != GlobalRouteDir.UNCLASSIFIED) {
+            // Deduce type
+            type = when {
+                wn.contains("BEG") -> PJType.SINK
+                wn.contains("END") -> PJType.SOURCE
+                else -> PJType.UNCLASSIFIED // unhandled
+            }
+        }
+
+        val grjType = GRJunctionType(dir, type)
+        if (!clusters.containsKey(grjType)) {
+            clusters[grjType] = mutableSetOf()
+        }
+
+        clusters[grjType]?.add(pj)
     }
 
     private fun getPJClass(wire: Wire): PJClass {

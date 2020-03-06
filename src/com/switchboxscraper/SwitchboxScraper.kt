@@ -13,9 +13,7 @@ import guru.nidi.graphviz.model.Factory.mutNode
 import guru.nidi.graphviz.model.LinkTarget
 import guru.nidi.graphviz.model.MutableGraph
 import guru.nidi.graphviz.model.MutableNode
-import org.apache.commons.io.IOUtils
 import java.io.File
-import java.nio.charset.Charset
 import java.util.*
 
 
@@ -76,70 +74,22 @@ class SwitchboxScraper(deviceName: String) {
 
     private fun dotToSvg(file: String) {
         println("Writing SVG file: '${file}.svg'...")
-        val p = ProcessBuilder("dot", "-Kfdp", "-Goverlap=scale", "-Gsplines=line", "-Tsvg", "-O", "${file}").start()
-    }
-
-    private fun clusterPIPGraphNode(icNode: PIPGraphNode, clusters: MutableMap<GRJunctionType, MutableList<PIPGraphNode>>) {
-        var dir : GlobalRouteDir
-        var type = PJType.UNCLASSIFIED
-        val wn = icNode.pip.wireName
-
-        // Deduce direction
-        dir = when {
-            wn.startsWith("EE") -> GlobalRouteDir.EE
-            wn.startsWith("NN") -> GlobalRouteDir.NN
-            wn.startsWith("SS") -> GlobalRouteDir.SS
-            wn.startsWith("WW") -> GlobalRouteDir.WW
-            wn.startsWith("NE") -> GlobalRouteDir.NE
-            wn.startsWith("NW") -> GlobalRouteDir.NW
-            wn.startsWith("SE") -> GlobalRouteDir.SE
-            wn.startsWith("SW") -> GlobalRouteDir.SW
-            else -> GlobalRouteDir.UNCLASSIFIED
-        }
-
-        if(dir != GlobalRouteDir.UNCLASSIFIED) {
-            // Deduce type
-            type = when {
-                wn.contains("BEG") -> PJType.SINK
-                wn.contains("END") -> PJType.SOURCE
-                else -> PJType.UNCLASSIFIED // unhandled
-            }
-        }
-
-        val grjType = GRJunctionType(dir, type)
-        if (!clusters.containsKey(grjType)) {
-            clusters[grjType] = mutableListOf()
-        }
-
-        clusters[grjType]?.add(icNode)
+        val p = ProcessBuilder("dot", "-Kfdp", "-Goverlap=scale", "-Gsplines=line", "-Tsvg", "-O", "${file}").start().waitFor()
     }
 
     private fun createInterconnectGraph(ic: Interconnect, query: GraphQuery): MutableGraph {
-        // Create graph nodes for each pip junction class selected for this graph
-        var icNodes = ic.pipJunctions
+        var icResources = ic.filterQuery(query)
+
+        // Create graph nodes for each PIP junction
+        var pipJunctionNodes = icResources.pipJunctions
                 .filter { pj -> ic.pjClassification[pj]?.pjClass in query.classes }
                 .fold(mutableMapOf<Wire, MutableNode>()) { acc2, pj ->
                     acc2[pj] = createPJGraphNode(ic, pj); acc2
                 }
 
-        // Cluster interconnect based on inferred position in the switchbox
-        var nodeClusters = mutableMapOf<GRJunctionType, MutableList<PIPGraphNode>>()
-        icNodes.map { clusterPIPGraphNode(PIPGraphNode(it), nodeClusters) }
-
-        // Remove any excluded clusters and the nodes of these clusters
-        val excludedClusters = nodeClusters.filter { it.key in query.excludes }
-        var excludedNodes = excludedClusters.entries.fold(mutableListOf<MutableNode>()) { nodes, excludedCluster ->
-            excludedCluster.value.map {
-                nodes.add(it.node)
-            }
-            nodes
-        }
-        icNodes.entries.removeAll { it.value in excludedNodes }
-        nodeClusters.keys.removeAll { it in excludedClusters.keys }
-
         // Create graphs for each cluster
         var graphClusters = mutableMapOf<GRJunctionType, MutableGraph>()
-        nodeClusters.map {
+        icResources.clusters.map {
             val clusterName = ic.name + " " + it.key.toString()
             val color = when (it.key.type) {
                 PJType.SOURCE -> Color.ORANGE
@@ -153,7 +103,8 @@ class SwitchboxScraper(deviceName: String) {
                     .add(Style.FILLED)
                     .graphAttrs().add(color)
                     .graphAttrs().add(Label.of(clusterName))
-            it.value.map { pipGraphNode -> g.add(pipGraphNode.node) }
+            // Add all nodes contained within this cluster
+            it.value.map { g.add(pipJunctionNodes[it]) }
             graphClusters[it.key] = g
         }
 
@@ -167,9 +118,9 @@ class SwitchboxScraper(deviceName: String) {
 
         // Create directed links between all created graph nodes and their destination (Forward) PIPs also present in
         // the graph.
-        icNodes.map { pjn ->
+        pipJunctionNodes.map { pjn ->
             // @note: This is a bit hacky;
-            // The links must be explicitely added to the parent graph instead of adding links to the nodes themselves.
+            // The links must be explicitly added to the parent graph instead of adding links to the nodes themselves.
             // It has been found, that if links are created on the nodes themselves, this will merge the linked nodes
             // into the subgraph which a node is included in. As a result, duplicate nodes will exist in the graph.
             // To circumvent this, for each connection, we create a pair of nodes equally named with the actual nodes
@@ -177,9 +128,9 @@ class SwitchboxScraper(deviceName: String) {
             // defined in the parent graph instead of within the subgraph, avoiding node duplication.
             val from = mutNode(pjn.value.name()) // Copy node name
             pjn.key.forwardPIPs
-                    .filter { pip -> icNodes.containsKey(pip.endWire) }
+                    .filter { it.endWire in icResources.pipJunctions }
                     .map {
-                        val to = mutNode(icNodes[it.endWire]?.name()) // Copy node name
+                        val to = mutNode(pipJunctionNodes[it.endWire]?.name()) // Copy node name
                         from.links().add(from.linkTo(to as LinkTarget))
                     }
             parentGraph.add(from)
