@@ -25,12 +25,15 @@ enum class PJRoutingType {
 }
 
 enum class GlobalRouteDir { EE, WW, SS, NN, NE, NW, SE, SW, UNCLASSIFIED }
-
 data class GRJunctionType(val dir: GlobalRouteDir, val type: PJType)
-
 data class PJProperty(val pjClass: PJClass, val pjType: PJType, val routingType: PJRoutingType)
 
-data class InterconnectResources(val pipJunctions : Set<Wire>, val clusters : Map<GRJunctionType, Set<Wire>>)
+data class JunctionQueryResult(val pipJunctions: Set<Wire>, val clusters: Map<GRJunctionType, Set<Wire>>)
+// A directed graph of the connectivity of each GRJunctionType
+data class ClusterQueryResult(val types: Set<GRJunctionType>, val connections: Map<GRJunctionType, Set<GRJunctionType>>)
+
+// Collection of each type of query result
+data class InterconnectQueryResult(val junctionResult: JunctionQueryResult, val clusterResult: ClusterQueryResult)
 
 class Interconnect(tile: Tile) {
     var pipJunctions = mutableSetOf<Wire>()
@@ -46,27 +49,62 @@ class Interconnect(tile: Tile) {
         pipJunctions.fold(pjClassification) { acc, pj -> acc[pj] = classifyPJ(pj); acc }
     }
 
-    fun filterQuery(query: GraphQuery) : InterconnectResources {
+    fun processQuery(query: GraphQuery): InterconnectQueryResult {
+        // --------------------------------------------------------------------
+        // Step 1: Process interconnect
+        // --------------------------------------------------------------------
         var pipJunctions = pipJunctions.toMutableSet()  // Copy PIP junctions of the interconnect
 
         // Cluster PIP Junctions based on inferred position in the switch box
         var pipJunctionClusters = mutableMapOf<GRJunctionType, MutableSet<Wire>>()
-        pipJunctions.map { clusterPIPJunction(it, pipJunctionClusters) }
+        var pipJunctionToCluster = mutableMapOf<Wire, GRJunctionType>() // Convenience map for looking up the cluster of a PIP junction
+        pipJunctions.map { clusterPIPJunction(it, pipJunctionClusters, pipJunctionToCluster) }
 
         // Remove any excluded clusters and the PIP junctions of these clusters in our list of pip junctions included
         // in this graph
         val excludedClusters = pipJunctionClusters.filter { it.key in query.excludes }
         var excludedNodes = excludedClusters.entries.fold(mutableListOf<Wire>()) { nodes, excludedCluster ->
-            excludedCluster.value.map {nodes.add(it) }; nodes
+            excludedCluster.value.map { nodes.add(it) }; nodes
         }
         pipJunctions.removeAll { it in excludedNodes }
         pipJunctionClusters.keys.removeAll { it in excludedClusters.keys }
 
-        return InterconnectResources(pipJunctions, pipJunctionClusters)
+        val junctionResult = JunctionQueryResult(pipJunctions, pipJunctionClusters)
+
+        // --------------------------------------------------------------------
+        // Step 2: Process cluster connectivity
+        // --------------------------------------------------------------------
+        var clusterConnectivity = mutableMapOf<GRJunctionType, MutableSet<GRJunctionType>>()
+        // Initialize graph
+        pipJunctionClusters.map {
+            clusterConnectivity[it.key] = mutableSetOf()
+        }
+
+        val clusterTypes = pipJunctionClusters.keys
+        // For each cluster type
+        pipJunctionClusters.map { cluster ->
+            // For each PIP Junction within the cluster
+            cluster.value.map { pipj ->
+                // For each forward PIP
+                pipj.forwardPIPs.map {pip ->
+                    if(pipJunctions.contains(pip.endWire)) {
+                        val connectsToCluster = pipJunctionToCluster[pip.endWire]!!
+                        clusterConnectivity[cluster.key]?.add(connectsToCluster)
+                    }
+                }
+            }
+        }
+        val clusterResult = ClusterQueryResult(clusterTypes, clusterConnectivity)
+
+        // --------------------------------------------------------------------
+        // Step 3: Return results
+        // --------------------------------------------------------------------
+        return InterconnectQueryResult(junctionResult, clusterResult)
     }
 
-    private fun clusterPIPJunction(pj: Wire, clusters: MutableMap<GRJunctionType, MutableSet<Wire>>) {
-        var dir : GlobalRouteDir
+    private fun clusterPIPJunction(pj: Wire, clusters: MutableMap<GRJunctionType,
+            MutableSet<Wire>>, reverseClusters: MutableMap<Wire, GRJunctionType>) {
+        var dir: GlobalRouteDir
         var type = PJType.UNCLASSIFIED
         val wn = pj.wireName
 
@@ -83,7 +121,7 @@ class Interconnect(tile: Tile) {
             else -> GlobalRouteDir.UNCLASSIFIED
         }
 
-        if(dir != GlobalRouteDir.UNCLASSIFIED) {
+        if (dir != GlobalRouteDir.UNCLASSIFIED) {
             // Deduce type
             type = when {
                 wn.contains("BEG") -> PJType.SINK
@@ -98,6 +136,7 @@ class Interconnect(tile: Tile) {
         }
 
         clusters[grjType]?.add(pj)
+        reverseClusters[pj] = grjType
     }
 
     private fun getPJClass(wire: Wire): PJClass {

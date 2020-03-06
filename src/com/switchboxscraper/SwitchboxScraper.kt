@@ -2,10 +2,8 @@ package com.switchboxscraper
 
 import com.xilinx.rapidwright.device.Device
 import com.xilinx.rapidwright.device.Wire
-import guru.nidi.graphviz.attribute.Color
-import guru.nidi.graphviz.attribute.Label
-import guru.nidi.graphviz.attribute.Shape
-import guru.nidi.graphviz.attribute.Style
+import guru.nidi.graphviz.attribute.*
+import guru.nidi.graphviz.attribute.Rank
 import guru.nidi.graphviz.engine.Format
 import guru.nidi.graphviz.engine.Graphviz
 import guru.nidi.graphviz.model.Factory.mutGraph
@@ -25,13 +23,17 @@ data class JunctionGraphCluster(val type: GRJunctionType, val graph: MutableGrap
     constructor(v: Map.Entry<GRJunctionType, MutableGraph>) : this(v.key, v.value)
 }
 
+enum class GraphType { Interconnect, ClusterConn, ClusterSS }
+
+data class DotFileToRender(val filename: String, val engine: String)
+
 data class GraphQuery(
         var tiles: List<String>,
         var classes: EnumSet<PJClass>,
         var excludes: List<GRJunctionType>) {
 
     override fun toString(): String {
-        var str = "sb_"
+        var str = ""
         tiles.map { str += it + "," }
         str += "_INCLUDES:"
         classes.map { str += it.toString() }
@@ -50,11 +52,11 @@ class SwitchboxScraper(deviceName: String) {
 
     fun scrape(query: GraphQuery) {
         query.tiles.map { name -> println("Scraping Switchbox: ${name}"); interconnects.add(Interconnect(device.getTile(name))) }
-        dotToSvg(createDotGraph(query))
+        dotsToSvg(createDotGraph(query))
     }
 
     private fun createPJGraphNode(ic: Interconnect, wire: Wire): MutableNode {
-        val node = mutNode(wire.wireName)
+        val node = mutNode(ic.name + ":" + wire.wireName)
         val prop = ic.pjClassification[wire]
         // Color classification by PIP junction class
         when (prop?.pjClass) {
@@ -72,16 +74,101 @@ class SwitchboxScraper(deviceName: String) {
         return node
     }
 
-    private fun dotToSvg(file: String) {
-        println("Writing SVG file: '${file}.svg'...")
-        val p = ProcessBuilder("dot", "-Kfdp", "-Goverlap=scale", "-Gsplines=line", "-Tsvg", "-O", "${file}").start().waitFor()
+    private fun dotsToSvg(files: List<DotFileToRender>) {
+        println("Writing SVG files: '${files}...")
+        files.map { file ->
+            val p = ProcessBuilder("dot", "-K${file.engine}", "-Goverlap=scale", "-Gsplines=line", "-Tsvg", "-O", "${file.filename}").start().waitFor()
+        }
     }
 
-    private fun createInterconnectGraph(ic: Interconnect, query: GraphQuery): MutableGraph {
-        var icResources = ic.filterQuery(query)
+    private fun createClusterSSGraph(ic: Interconnect, query: GraphQuery, cqr: ClusterQueryResult): MutableGraph {
+        // Create graph nodes for each cluster
+        var clusters = cqr.types
+                .filter { it !in query.excludes }
+                .fold(mutableMapOf<GRJunctionType, MutableNode>()) { acc, type ->
+                    val clusterName = ic.name + ":" + type.toString()
+                    acc[type] = mutNode(clusterName)
+                    acc
+                }
 
+        // Cluster together source and sink nodes
+        val sourceGraph = mutGraph(ic.name + ": Source")
+                .setDirected(true)
+                .setCluster(true)
+                .graphAttrs().add(Color.RED)
+                .graphAttrs().add(Label.of(ic.name + ": Source"))
+                .graphAttrs().add(Rank.dir(Rank.RankDir.TOP_TO_BOTTOM))
+        clusters.filter { it.key.type == PJType.SOURCE }.map { it.value.addTo(sourceGraph) }
+        val sinkGraph = mutGraph(ic.name + ": Sink")
+                .setDirected(true)
+                .setCluster(true)
+                .graphAttrs().add(Color.GREEN)
+                .graphAttrs().add(Label.of(ic.name + ": Sink"))
+                .graphAttrs().add(Rank.dir(Rank.RankDir.TOP_TO_BOTTOM))
+        clusters.filter { it.key.type == PJType.SINK }.map { it.value.addTo(sinkGraph) }
+
+        // Add source and sink clusters to a top-level graph
+        val parentGraph = mutGraph(ic.name)
+                .setDirected(true)
+                .setCluster(true)
+                .graphAttrs().add(Color.RED)
+                .graphAttrs().add(Label.of(ic.name))
+                .graphAttrs().add(Rank.dir(Rank.RankDir.TOP_TO_BOTTOM))
+        sourceGraph.addTo(parentGraph)
+        sinkGraph.addTo(parentGraph)
+
+        // Create connections between each cluster
+        cqr.connections.map {
+            val from = mutNode(clusters[it.key]?.name()) // Copy node name
+            it.value.map {
+                val to = mutNode(clusters[it]?.name()) // Copy node name
+                from.links().add(from.linkTo(to as LinkTarget))
+            }
+            parentGraph.add(from)
+        }
+
+        return parentGraph
+    }
+
+
+    private fun createClusterConnectivityGraph(ic: Interconnect, query: GraphQuery, cqr: ClusterQueryResult): MutableGraph {
+        // Create graph nodes for each cluster
+        var clusters = cqr.types
+                .filter { it !in query.excludes }
+                .fold(mutableMapOf<GRJunctionType, MutableNode>()) { acc, type ->
+                    val clusterName = ic.name + ":" + type.toString()
+                    acc[type] = when (type.type) {
+                        PJType.SOURCE -> mutNode(clusterName).add(Shape.RECTANGLE).add(Color.GREEN)
+                        PJType.SINK -> mutNode(clusterName).add(Shape.DIAMOND).add(Color.BLUE)
+                        else -> mutNode(clusterName)
+                    }
+                    acc
+                }
+
+        // Add all clusters to a top-level graph
+        val parentGraph = mutGraph(ic.name)
+                .setDirected(true)
+                .setCluster(true)
+                .graphAttrs().add(Color.RED)
+                .graphAttrs().add(Label.of(ic.name))
+        clusters.map { it.value.addTo(parentGraph) }
+
+        // Create connections between each cluster
+        cqr.connections.map {
+            val from = mutNode(clusters[it.key]?.name()) // Copy node name
+            it.value.map {
+                val to = mutNode(clusters[it]?.name()) // Copy node name
+                from.links().add(from.linkTo(to as LinkTarget))
+            }
+            parentGraph.add(from)
+        }
+
+        return parentGraph
+    }
+
+    private fun createInterconnectGraph(ic: Interconnect, query: GraphQuery, iqr: JunctionQueryResult): MutableGraph {
         // Create graph nodes for each PIP junction
-        var pipJunctionNodes = icResources.pipJunctions
+        var pipJunctionNodes = iqr.pipJunctions
                 .filter { pj -> ic.pjClassification[pj]?.pjClass in query.classes }
                 .fold(mutableMapOf<Wire, MutableNode>()) { acc2, pj ->
                     acc2[pj] = createPJGraphNode(ic, pj); acc2
@@ -89,7 +176,7 @@ class SwitchboxScraper(deviceName: String) {
 
         // Create graphs for each cluster
         var graphClusters = mutableMapOf<GRJunctionType, MutableGraph>()
-        icResources.clusters.map {
+        iqr.clusters.map {
             val clusterName = ic.name + " " + it.key.toString()
             val color = when (it.key.type) {
                 PJType.SOURCE -> Color.ORANGE
@@ -128,7 +215,7 @@ class SwitchboxScraper(deviceName: String) {
             // defined in the parent graph instead of within the subgraph, avoiding node duplication.
             val from = mutNode(pjn.value.name()) // Copy node name
             pjn.key.forwardPIPs
-                    .filter { it.endWire in icResources.pipJunctions }
+                    .filter { it.endWire in iqr.pipJunctions }
                     .map {
                         val to = mutNode(pipJunctionNodes[it.endWire]?.name()) // Copy node name
                         from.links().add(from.linkTo(to as LinkTarget))
@@ -139,41 +226,68 @@ class SwitchboxScraper(deviceName: String) {
         return parentGraph
     }
 
-    private fun createDotGraph(query: GraphQuery): String {
-        val graphName = query.toString()
-        println("\tCreating graph for PIPs of type(s): ${graphName}")
-
+    private fun createDotGraph(query: GraphQuery): List<DotFileToRender> {
         // For each switchbox, create graph nodes for each pip junction class selected for this graph
-        val icGraphs = interconnects.fold(mutableMapOf<Interconnect, MutableGraph>()) { acc, ic ->
-            acc[ic] = createInterconnectGraph(ic, query)
+        var graphs = mutableMapOf<GraphType, MutableMap<Interconnect, MutableGraph>>()
+        GraphType.values().map { graphs[it] = mutableMapOf() }
+
+
+        interconnects.fold(graphs) { acc, ic ->
+            var results = ic.processQuery(query)
+
+            acc[GraphType.Interconnect]!![ic] = createInterconnectGraph(ic, query, results.junctionResult)
+            acc[GraphType.ClusterConn]!![ic] = createClusterConnectivityGraph(ic, query, results.clusterResult)
+            acc[GraphType.ClusterSS]!![ic] = createClusterSSGraph(ic, query, results.clusterResult)
             acc
         }
 
-        // Add all Interconnect graphs to a single graph and write the graph
-        val parentGraph = mutGraph("Parent").setDirected(true)
-        icGraphs.map { it.value.addTo(parentGraph) }
+        // For each graph type Add all graphs to a single parent graph and write the graph
+        var graphFiles = mutableListOf<DotFileToRender>()
+        graphs.map {
+            val parentGraph = mutGraph("Parent").setDirected(true)
+            it.value.map { it.value.addTo(parentGraph) }
 
-        val fileName = "graphs/${graphName}.dot"
-        return Graphviz.fromGraph(parentGraph).render(Format.DOT).toFile(File(fileName)).absolutePath
+            val graphName = "sb_" + it.key.toString() + "_" + query.toString()
+            val fileName = "graphs/${graphName}.dot"
+            Graphviz.fromGraph(parentGraph).render(Format.DOT).toFile(File(fileName)).absolutePath
+
+            val engine = when (it.key) {
+                GraphType.Interconnect -> "fdp" // Interconnect is rendered with an undirected engine, due to its possible size
+                GraphType.ClusterSS -> "dot"
+                GraphType.ClusterConn -> "circo"
+                else -> "fdp"
+            }
+            graphFiles.add(DotFileToRender(fileName, engine))
+        }
+
+        return graphFiles
     }
 }
 
 fun main(args: Array<String>) {
     val sbs = SwitchboxScraper("xc7a35t")
-    var query : GraphQuery
 
-    query = GraphQuery(
-            /*Interconnects:*/  listOf("INT_R_X41Y61", "CLBLM_R_X41Y61"),
+    sbs.scrape(GraphQuery(
+            /*Interconnects:*/  listOf("INT_R_X41Y61"),
             /*Classes:*/        EnumSet.allOf(PJClass::class.java),
             /*Excludes:*/       listOf(GRJunctionType(GlobalRouteDir.UNCLASSIFIED, PJType.UNCLASSIFIED))
     )
-    sbs.scrape(query)
+    )
 
-    query = GraphQuery(
-            /*Interconnects:*/  listOf("INT_R_X41Y61", "CLBLM_R_X41Y61"),
+    sbs.scrape(GraphQuery(
+            /*Interconnects:*/  listOf("INT_R_X41Y61"),
             /*Classes:*/        EnumSet.allOf(PJClass::class.java),
             /*Excludes:*/       listOf()
     )
-    sbs.scrape(query)
+    )
+
+    sbs.scrape(GraphQuery(
+            /*Interconnects:*/  listOf("INT_R_X41Y61", "INT_L_X40Y61"),
+            /*Classes:*/        EnumSet.allOf(PJClass::class.java),
+            /*Excludes:*/       listOf(GRJunctionType(GlobalRouteDir.UNCLASSIFIED, PJType.UNCLASSIFIED))
+    )
+    )
+
+    return
 
 }
