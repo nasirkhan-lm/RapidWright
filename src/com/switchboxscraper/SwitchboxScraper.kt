@@ -141,12 +141,17 @@ class SwitchboxScraper(deviceName: String) {
         var graphClusters = mutableMapOf<GRJunctionType, MutableGraph>()
         nodeClusters.map {
             val clusterName = ic.name + " " + it.key.toString()
+            val color = when (it.key.type) {
+                PJType.SOURCE -> Color.ORANGE
+                PJType.SINK -> Color.GREEN
+                else -> Color.BLACK
+            }
             val g = mutGraph(clusterName)
                     .setDirected(true)
                     .setCluster(true)
                     .nodeAttrs()
                     .add(Style.FILLED)
-                    .graphAttrs().add(Color.RED)
+                    .graphAttrs().add(color)
                     .graphAttrs().add(Label.of(clusterName))
             it.value.map { pipGraphNode -> g.add(pipGraphNode.node) }
             graphClusters[it.key] = g

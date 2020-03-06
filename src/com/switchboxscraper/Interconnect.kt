@@ -13,16 +13,18 @@ enum class PJType {
     SOURCE,
     SINK,
     BUF,
-    INTERNAL
+    INTERNAL,
+    UNCLASSIFIED
 }
 
 enum class PJRoutingType {
     GLOBAL,
     CLB,
-    INTERNAL
+    INTERNAL,
+    UNCLASSIFIED
 }
 
-enum class GlobalRouteDir { EE, WW, SS, NN, NE, NW, SE, SW, INVALID }
+enum class GlobalRouteDir { EE, WW, SS, NN, NE, NW, SE, SW, UNCLASSIFIED }
 
 data class GRJunctionType(val dir: GlobalRouteDir, val type: PJType)
 
@@ -44,10 +46,10 @@ class Interconnect(tile: Tile) {
 
     private fun getPJClass(wire: Wire): PJClass {
         val wn = wire.wireName
-        when {
-            wn.contains("CLK") -> return PJClass.CLK
-            wn.contains("VCC") || wn.contains("GND") -> return PJClass.ELEC
-            else -> return PJClass.ROUTING
+        return when {
+            wn.contains("CLK") -> PJClass.CLK
+            wn.contains("VCC") || wn.contains("GND") -> PJClass.ELEC
+            else -> PJClass.ROUTING
         }
     }
 
