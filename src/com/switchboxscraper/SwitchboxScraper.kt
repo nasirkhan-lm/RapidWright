@@ -12,6 +12,7 @@ import guru.nidi.graphviz.model.LinkTarget
 import guru.nidi.graphviz.model.MutableGraph
 import guru.nidi.graphviz.model.MutableNode
 import java.io.File
+import java.lang.NullPointerException
 import java.util.*
 
 
@@ -25,7 +26,9 @@ data class JunctionGraphCluster(val type: GRJunctionType, val graph: MutableGrap
 
 enum class GraphType { Interconnect, ClusterConn, ClusterSS }
 
-data class DotFileToRender(val filename: String, val engine: String)
+data class DotFileToRender(val filename: String, val engine: String, val extraProps : List<String>)
+
+data class GraphResult(var graph : MutableGraph, var root : MutableNode?)
 
 data class GraphQuery(
         var tiles: List<String>,
@@ -77,11 +80,12 @@ class SwitchboxScraper(deviceName: String) {
     private fun dotsToSvg(files: List<DotFileToRender>) {
         println("Writing SVG files: '${files}...")
         files.map { file ->
-            val p = ProcessBuilder("dot", "-K${file.engine}", "-Goverlap=scale", "-Gsplines=line", "-Tsvg", "-O", "${file.filename}").start().waitFor()
+            val extraProps = file.extraProps.fold(""){acc, prop -> acc + "-G" + prop + " "}
+            val p = ProcessBuilder("dot", "-K${file.engine}", "-Goverlap=scale", "-Gsplines=line", extraProps, "-Tsvg", "-O", "${file.filename}").start().waitFor()
         }
     }
 
-    private fun createClusterSSGraph(ic: Interconnect, query: GraphQuery, cqr: ClusterQueryResult): MutableGraph {
+    private fun createClusterSSGraph(ic: Interconnect, query: GraphQuery, cqr: ClusterQueryResult): GraphResult {
         // Create graph nodes for each cluster
         var clusters = cqr.types
                 .filter { it !in query.excludes }
@@ -127,11 +131,11 @@ class SwitchboxScraper(deviceName: String) {
             parentGraph.add(from)
         }
 
-        return parentGraph
+        return GraphResult(parentGraph, null)
     }
 
 
-    private fun createClusterConnectivityGraph(ic: Interconnect, query: GraphQuery, cqr: ClusterQueryResult): MutableGraph {
+    private fun createClusterConnectivityGraph(ic: Interconnect, query: GraphQuery, cqr: ClusterQueryResult): GraphResult {
         // Create graph nodes for each cluster
         var clusters = cqr.types
                 .filter { it !in query.excludes }
@@ -163,10 +167,13 @@ class SwitchboxScraper(deviceName: String) {
             parentGraph.add(from)
         }
 
-        return parentGraph
+        // If an unclassified group exists within the connected graph ,set it as a root node
+        val rootNode =  clusters[GRJunctionType(GlobalRouteDir.UNCLASSIFIED, PJType.UNCLASSIFIED)]
+
+        return GraphResult(parentGraph, rootNode)
     }
 
-    private fun createInterconnectGraph(ic: Interconnect, query: GraphQuery, iqr: JunctionQueryResult): MutableGraph {
+    private fun createInterconnectGraph(ic: Interconnect, query: GraphQuery, iqr: JunctionQueryResult): GraphResult {
         // Create graph nodes for each PIP junction
         var pipJunctionNodes = iqr.pipJunctions
                 .filter { pj -> ic.pjClassification[pj]?.pjClass in query.classes }
@@ -223,12 +230,12 @@ class SwitchboxScraper(deviceName: String) {
             parentGraph.add(from)
         }
 
-        return parentGraph
+        return GraphResult(parentGraph, null)
     }
 
     private fun createDotGraph(query: GraphQuery): List<DotFileToRender> {
         // For each switchbox, create graph nodes for each pip junction class selected for this graph
-        var graphs = mutableMapOf<GraphType, MutableMap<Interconnect, MutableGraph>>()
+        var graphs = mutableMapOf<GraphType, MutableMap<Interconnect, GraphResult>>()
         GraphType.values().map { graphs[it] = mutableMapOf() }
 
 
@@ -245,7 +252,7 @@ class SwitchboxScraper(deviceName: String) {
         var graphFiles = mutableListOf<DotFileToRender>()
         graphs.map {
             val parentGraph = mutGraph("Parent").setDirected(true)
-            it.value.map { it.value.addTo(parentGraph) }
+            it.value.map { it.value.graph.addTo(parentGraph) }
 
             val graphName = "sb_" + it.key.toString() + "_" + query.toString()
             val fileName = "graphs/${graphName}.dot"
@@ -257,7 +264,28 @@ class SwitchboxScraper(deviceName: String) {
                 GraphType.ClusterConn -> "circo"
                 else -> "fdp"
             }
-            graphFiles.add(DotFileToRender(fileName, engine))
+
+            // Extra properties
+            val extraProps = when(it.key) {
+                GraphType.ClusterConn -> {
+                    // Locate a root node
+                    var root : MutableNode? = null
+                    for(g in it.value) {
+                        if(g.value.root != null){
+                            root = g.value.root
+                            break
+                        }
+                    }
+                    if(root != null) {
+                        listOf("root=\"${root.name()}\"")
+                    } else {
+                        listOf()
+                    }
+                }
+                else -> listOf()
+            }
+
+            graphFiles.add(DotFileToRender(fileName, engine, extraProps))
         }
 
         return graphFiles
