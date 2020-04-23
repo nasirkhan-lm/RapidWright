@@ -53,8 +53,16 @@ class SwitchboxScraper(deviceName: String) {
     var device: Device = Device.getDevice(deviceName)
     var interconnects = mutableListOf<Interconnect>()
 
+    /**
+     * Scrapes the switchbox and executes some user-defined function as a query
+     */
+    fun scrapeWithFunc(query : GraphQuery, f : (gq: GraphQuery, ss: SwitchboxScraper) -> Unit) {
+        query.tiles.map { name -> println("Scraping Switchbox: ${name}");interconnects.add(Interconnect(device.getTile(name))) }
+        f(query, this)
+    }
+
     fun scrape(query: GraphQuery) {
-        query.tiles.map { name -> println("Scraping Switchbox: ${name}"); interconnects.add(Interconnect(device.getTile(name))) }
+        query.tiles.map { name -> println("Scraping Switchbox: ${name}");interconnects.add(Interconnect(device.getTile(name))) }
         dotsToSvg(createDotGraph(query))
     }
 
@@ -292,8 +300,89 @@ class SwitchboxScraper(deviceName: String) {
     }
 }
 
+fun compareSwitchboxes(gq: GraphQuery, ss: SwitchboxScraper) {
+    val sb1 = ss.interconnects[0]
+    val sb2 = ss.interconnects[1]
+
+    var sb1_wires = sb1.pipJunctions.fold(mutableSetOf<String>()){acc, wire -> acc.add(wire.wireName); acc }
+    var sb2_wires = sb2.pipJunctions.fold(mutableSetOf<String>()){acc, wire -> acc.add(wire.wireName); acc }
+
+    var symdiff = (sb1_wires - sb2_wires).union(sb2_wires - sb1_wires)
+
+    if(symdiff.isEmpty()) {
+        println("Switchboxes wire names are equal.")
+    } else {
+        println("Switchboxes are unequal. Differring wires:")
+        symdiff.map { wirename -> println("\t ${wirename}") }
+    }
+}
+
+fun countClusters(gq: GraphQuery, ss: SwitchboxScraper) {
+    var wirenames = ss.interconnects[0].pipJunctions.fold(mutableListOf<String>()){acc, wire -> acc.add(wire.wireName); acc }
+
+    wirenames.sort()
+
+    data class ClusterCount(var count: MutableList<String>, val reg: Regex)
+    var clusterTypes = mutableListOf<ClusterCount>()
+
+    // Create Regexes for each class
+    for (dir in GlobalRouteDir.values()) {
+        for (io in listOf("BEG", "END")) {
+            var reg = (dir.toString() + "[0-9]*" + io + ".*").toRegex();
+            clusterTypes.add(ClusterCount(mutableListOf(), reg))
+        }
+    }
+
+    var unmatchedWires = mutableSetOf<String>()
+
+    // Match names to classes
+    for (wire in wirenames) {
+        var matched = false
+        for(clusterClass in clusterTypes) {
+            if(clusterClass.reg.matches(wire)){
+                clusterClass.count.add(wire)
+                matched = true
+                break
+            }
+        }
+
+        if(!matched) {
+            // Unmatched wire
+            unmatchedWires.add(wire)
+        }
+    }
+
+    println("Wire counts:")
+    clusterTypes.map { println("\t${it.reg.toString()} : ${it.count.size} ${it.count}") }
+
+    println("\nUnmatched wires:")
+    println(unmatchedWires)
+}
+
 fun main(args: Array<String>) {
     val sbs = SwitchboxScraper("xc7a35t")
+
+    // Get a cluster count for each connection type
+    sbs.scrapeWithFunc(GraphQuery(
+            /*Interconnects:*/  listOf("INT_R_X41Y60"),
+            /*Classes:*/        EnumSet.allOf(PJClass::class.java),
+            /*Excludes:*/       listOf()
+    ), ::countClusters
+    )
+
+    // Compare name equality of two switchboxes. The following two connects to 1: a BRAM and 2: a CLB
+    sbs.scrapeWithFunc(GraphQuery(
+            /*Interconnects:*/  listOf("INT_R_X41Y60", "INT_R_X37Y22"),
+            /*Classes:*/        EnumSet.allOf(PJClass::class.java),
+            /*Excludes:*/       listOf()
+    ), ::compareSwitchboxes
+    )
+    sbs.scrapeWithFunc(GraphQuery(
+            /*Interconnects:*/  listOf("INT_R_X41Y60", "INT_R_X41Y61"),
+            /*Classes:*/        EnumSet.allOf(PJClass::class.java),
+            /*Excludes:*/       listOf()
+    ), ::compareSwitchboxes
+    )
 
     sbs.scrape(GraphQuery(
             /*Interconnects:*/  listOf("INT_R_X41Y61"),

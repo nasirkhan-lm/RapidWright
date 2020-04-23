@@ -24,7 +24,7 @@ enum class PJRoutingType {
     UNCLASSIFIED
 }
 
-enum class GlobalRouteDir { EE, WW, SS, NN, NE, NW, SE, SW, UNCLASSIFIED }
+enum class GlobalRouteDir { EE, WW, SS, NN, NE, NW, SE, SW, SR, SL, EL, ER, WL, WR, NL, NR, UNCLASSIFIED }
 data class GRJunctionType(val dir: GlobalRouteDir, val type: PJType)
 data class PJProperty(val pjClass: PJClass, val pjType: PJType, val routingType: PJRoutingType)
 
