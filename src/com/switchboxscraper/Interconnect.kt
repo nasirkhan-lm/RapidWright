@@ -36,17 +36,74 @@ data class ClusterQueryResult(val types: Set<GRJunctionType>, val connections: M
 data class InterconnectQueryResult(val junctionResult: JunctionQueryResult, val clusterResult: ClusterQueryResult)
 
 class Interconnect(tile: Tile) {
+    // List of all pip junctions in the switchbox
     var pipJunctions = mutableSetOf<Wire>()
+    // List of all pip junctions in the switchbox switch begin or end a global routing wire
+    var globalPipJunctions = mutableSetOf<Wire>()
+
     var pjClassification = mutableMapOf<Wire, PJProperty>()
     var name: String = ""
+    var tile: Tile = tile;
 
     init {
         name = tile.name
+
+        gatherPipJunctions()
+        gatherGlobalPipJunctions()
+
+        // Perform PIP junction classification
+        pipJunctions.fold(pjClassification) { acc, pj -> acc[pj] = classifyPJ(pj); acc }
+    }
+
+    fun gatherPipJunctions() {
         // Extract all pip junctions by iterating over all PIPs in the tile and collecting the pip start/stop wires
         // which are defined as the pip junctions
         tile.getPIPs().fold(pipJunctions) { junctions, pip -> junctions.addAll(listOf(pip.startWire, pip.endWire)); junctions }
-        // Perform PIP junction classification
-        pipJunctions.fold(pjClassification) { acc, pj -> acc[pj] = classifyPJ(pj); acc }
+    }
+
+    fun gatherGlobalPipJunctions() {
+        // A global pip junction will be located by determining whether the source (for END junctions) or sink
+        // (for BEG junctions) are located in this tile, or in an external tile
+        pipJunctions.fold(globalPipJunctions) {
+            acc, pip ->
+                val checker = fun() {
+                    val node = pip.node
+                    var candidateExternalTile: Tile? = null
+
+                    // Check if a global routing wire TERMINATES in this switchbox
+                    if (node.tile != tile) {
+                        // the node of the wire has its base wire in a tile that is not this tile; hence it must be a global wire
+                        candidateExternalTile = node.tile
+                    }
+                    // Check if this wire is the START of a global routing wire
+                    else {
+
+                        for (nodeWire in node.allWiresInNode) {
+                            if (nodeWire.tile != tile) {
+                                candidateExternalTile = nodeWire.tile
+                                break
+                            }
+                        }
+                    }
+
+                    if (candidateExternalTile != null) {
+                        // Are we logically still on the same tile? This would be the case if the node terminated in ie. the CLB
+                        // connected to the switchbox, which will have the same coordinates
+                        val x = candidateExternalTile.tileXCoordinate
+                        val y = candidateExternalTile.tileYCoordinate
+
+                        if(x == tile.tileXCoordinate && y == tile.tileYCoordinate){
+                            return
+                        }
+
+                        acc.add(pip)
+                    }
+
+                    return
+                }
+            checker()
+            ; acc
+        }
     }
 
     fun processQuery(query: GraphQuery): InterconnectQueryResult {
