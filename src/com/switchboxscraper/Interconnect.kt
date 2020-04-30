@@ -2,6 +2,7 @@ package com.switchboxscraper
 
 import com.xilinx.rapidwright.device.Tile
 import com.xilinx.rapidwright.device.Wire
+import java.lang.Exception
 
 enum class PJClass {
     CLK,
@@ -28,6 +29,23 @@ enum class GlobalRouteDir { EE, WW, SS, NN, NE, NW, SE, SW, SR, SL, EL, ER, WL, 
 data class GRJunctionType(val dir: GlobalRouteDir, val type: PJType)
 data class PJProperty(val pjClass: PJClass, val pjType: PJType, val routingType: PJRoutingType)
 
+data class Point(val x : Int, val y : Int)
+fun getDirection(p1 : Point, p2 : Point) : GlobalRouteDir {
+    // Check rectilinear
+    if(p1.x == p2.x) {
+        return if(p1.y < p2.y) GlobalRouteDir.NN else GlobalRouteDir.SS;
+    }else if (p1.y == p2.y) {
+        return if(p1.x > p2.x) GlobalRouteDir.WW else GlobalRouteDir.EE;
+    }
+
+    // Check diagonal
+    if(p1.x > p2.x){
+        return if(p1.y < p2.y) GlobalRouteDir.NW else GlobalRouteDir.SW;
+    } else {
+        return if(p1.y < p2.y) GlobalRouteDir.NE else GlobalRouteDir.SE;
+    }
+}
+
 data class JunctionQueryResult(val pipJunctions: Set<Wire>, val clusters: Map<GRJunctionType, Set<Wire>>)
 // A directed graph of the connectivity of each GRJunctionType
 data class ClusterQueryResult(val types: Set<GRJunctionType>, val connections: Map<GRJunctionType, Set<GRJunctionType>>)
@@ -41,6 +59,9 @@ class Interconnect(tile: Tile) {
     // List of all pip junctions in the switchbox switch begin or end a global routing wire
     var globalPipJunctions = mutableSetOf<Wire>()
 
+    // List of all pip junctions classified by their directionality
+    var dirGlobalPipJunctions = mutableMapOf<GlobalRouteDir, MutableSet<Wire>>()
+
     var pjClassification = mutableMapOf<Wire, PJProperty>()
     var name: String = ""
     var tile: Tile = tile;
@@ -50,6 +71,7 @@ class Interconnect(tile: Tile) {
 
         gatherPipJunctions()
         gatherGlobalPipJunctions()
+        classifyGlobalPipJunctionDir()
 
         // Perform PIP junction classification
         pipJunctions.fold(pjClassification) { acc, pj -> acc[pj] = classifyPJ(pj); acc }
@@ -57,53 +79,120 @@ class Interconnect(tile: Tile) {
 
     fun gatherPipJunctions() {
         // Extract all pip junctions by iterating over all PIPs in the tile and collecting the pip start/stop wires
-        // which are defined as the pip junctions
-        tile.getPIPs().fold(pipJunctions) { junctions, pip -> junctions.addAll(listOf(pip.startWire, pip.endWire)); junctions }
+        // which are defined as the pip junctions. Only gather routable pips
+        for( pip in tile.getPIPs()) {
+            for (wire in listOf(pip.startWire, pip.endWire)){
+                if(getPJClass(wire) == PJClass.ROUTING) {
+                    pipJunctions.add(wire);
+                }
+            }
+        }
     }
 
     fun gatherGlobalPipJunctions() {
         // A global pip junction will be located by determining whether the source (for END junctions) or sink
         // (for BEG junctions) are located in this tile, or in an external tile
-        pipJunctions.fold(globalPipJunctions) {
-            acc, pip ->
-                val checker = fun() {
-                    val node = pip.node
-                    var candidateExternalTile: Tile? = null
+        for(wire in pipJunctions){
+            val node = wire.node
+            var candidateExternalTile: Tile? = null
 
-                    // Check if a global routing wire TERMINATES in this switchbox
-                    if (node.tile != tile) {
-                        // the node of the wire has its base wire in a tile that is not this tile; hence it must be a global wire
-                        candidateExternalTile = node.tile
+            // Check if a global routing wire TERMINATES in this switchbox
+            if (node.tile != tile) {
+                // the node of the wire has its base wire in a tile that is not this tile; hence it must be a global wire
+                candidateExternalTile = node.tile
+            }
+            // Check if this wire is the START of a global routing wire
+            else {
+
+                for (nodeWire in node.allWiresInNode) {
+                    if (nodeWire.tile != tile) {
+                        candidateExternalTile = nodeWire.tile
+                        break
                     }
-                    // Check if this wire is the START of a global routing wire
-                    else {
-
-                        for (nodeWire in node.allWiresInNode) {
-                            if (nodeWire.tile != tile) {
-                                candidateExternalTile = nodeWire.tile
-                                break
-                            }
-                        }
-                    }
-
-                    if (candidateExternalTile != null) {
-                        // Are we logically still on the same tile? This would be the case if the node terminated in ie. the CLB
-                        // connected to the switchbox, which will have the same coordinates
-                        val x = candidateExternalTile.tileXCoordinate
-                        val y = candidateExternalTile.tileYCoordinate
-
-                        if(x == tile.tileXCoordinate && y == tile.tileYCoordinate){
-                            return
-                        }
-
-                        acc.add(pip)
-                    }
-
-                    return
                 }
-            checker()
-            ; acc
+            }
+
+            if (candidateExternalTile != null) {
+                // Are we logically still on the same tile? This would be the case if the node terminated in ie. the CLB
+                // connected to the switchbox, which will have the same coordinates
+                val x = candidateExternalTile.tileXCoordinate
+                val y = candidateExternalTile.tileYCoordinate
+
+                if(x == tile.tileXCoordinate && y == tile.tileYCoordinate){
+                    continue
+                }
+
+                globalPipJunctions.add(wire)
+            }
         }
+    }
+
+    /**
+     * Given @param wire, a wire on the border of this switchbox, returns the tile of which the node of this wire
+     * connects to.
+     */
+    fun getExternalTile(wire : Wire): Tile? {
+        var node = wire.node
+        var externalTile : Tile? = null
+        if (wire.startWire == wire) {
+
+            if(node.allDownhillPIPs.isEmpty())
+                println("?")
+
+            // This is a source wire. Identify sink wires by iterating over the downhill PIPs and sanity checking that
+            // they all terminate in the same tile. The downhill PIPs corresponds to the *outputs* within the pip
+            // junction of the *end* switchbox which this wire connects to
+            externalTile = node.allDownhillPIPs[0].tile
+
+            // Sanity check that all of the downhill pips are in the same tile
+            val pipsInSameTile = node.allDownhillPIPs.fold(true){inSameTile, pip -> inSameTile && (pip.tile == tile)}
+
+            if(!pipsInSameTile){
+                println("Wire ${wire.toString()} fanned out to pips located in different tiles!")
+            }
+
+        } else {
+            // This is a sink wire. The source wire will be the base wire of the associated node
+            externalTile = node.tile
+        }
+        return externalTile
+    }
+
+    /**
+     * Analyses the connectivity of each Pip junction onto the global routing network, to determine the direction
+     * of the incoming wire (from the global routing network) into the PIP junction.
+     */
+    fun classifyGlobalPipJunctionDir() {
+        for(pip in globalPipJunctions) {
+            var externalTile = getExternalTile(pip)
+
+            if(externalTile == null)
+                continue
+
+            // External tile detected. Get the direction between the two tiles
+            val p1 = Point(tile.tileXCoordinate, tile.tileYCoordinate)
+            val p2 = Point(externalTile.tileXCoordinate, externalTile.tileYCoordinate)
+
+            val dir = getDirection(p1, p2)
+
+            if (dirGlobalPipJunctions[dir] == null){
+                dirGlobalPipJunctions[dir] = mutableSetOf<Wire>()
+            }
+            dirGlobalPipJunctions[dir]?.add(pip)
+        }
+    }
+
+    fun wireLength(wire : Wire): Int {
+        val externalTile = getExternalTile(wire) ?: throw Exception()
+        return tile.getTileManhattanDistance(externalTile)
+    }
+
+    fun wireSpan(wire : Wire): Point {
+        val externalTile = getExternalTile(wire) ?: throw Exception()
+        val p1 = Point(tile.tileXCoordinate, tile.tileYCoordinate)
+        val p2 = Point(externalTile.tileXCoordinate, externalTile.tileYCoordinate)
+
+        return Point(p2.x - p1.x, p2.y - p1.y)
     }
 
     fun processQuery(query: GraphQuery): InterconnectQueryResult {

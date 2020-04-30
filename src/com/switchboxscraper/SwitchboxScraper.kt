@@ -11,6 +11,7 @@ import guru.nidi.graphviz.model.Factory.mutNode
 import guru.nidi.graphviz.model.LinkTarget
 import guru.nidi.graphviz.model.MutableGraph
 import guru.nidi.graphviz.model.MutableNode
+import org.json.JSONObject
 import java.io.File
 import java.lang.NullPointerException
 import java.util.*
@@ -359,6 +360,30 @@ fun countClusters(gq: GraphQuery, ss: SwitchboxScraper) {
     println(unmatchedWires)
 }
 
+
+/**
+ * For each global routing direction, counts the number of wires of each length type
+ */
+fun analyzeWireLength(gq: GraphQuery, ss: SwitchboxScraper) {
+    val interconnect = ss.interconnects[0]
+
+    /**
+     * The direction map will contain the count of wires for each possible XY wire length available
+     */
+    var directionMap = mutableMapOf<Point, Int>()
+
+    for(wire in interconnect.globalPipJunctions) {
+        val direction = interconnect.wireSpan(wire)
+        if(!directionMap.containsKey(direction))
+            directionMap[direction] = 0
+
+        directionMap[direction] = directionMap[direction]!! + 1
+    }
+
+    // Dump to file
+    File("test.json").writeText(JSONObject(directionMap).toString())
+}
+
 fun main(args: Array<String>) {
     val sbs = SwitchboxScraper("xc7a35t")
 
@@ -367,8 +392,10 @@ fun main(args: Array<String>) {
             /*Interconnects:*/  listOf("INT_R_X41Y60"),
             /*Classes:*/        EnumSet.allOf(PJClass::class.java),
             /*Excludes:*/       listOf()
-    ), ::countClusters
+    ), ::analyzeWireLength
     )
+
+    return
 
     // Compare name equality of two switchboxes. The following two connects to 1: a BRAM and 2: a CLB
     sbs.scrapeWithFunc(GraphQuery(
@@ -377,34 +404,36 @@ fun main(args: Array<String>) {
             /*Excludes:*/       listOf()
     ), ::compareSwitchboxes
     )
-    sbs.scrapeWithFunc(GraphQuery(
-            /*Interconnects:*/  listOf("INT_R_X41Y60", "INT_R_X41Y61"),
-            /*Classes:*/        EnumSet.allOf(PJClass::class.java),
-            /*Excludes:*/       listOf()
-    ), ::compareSwitchboxes
-    )
 
-    sbs.scrape(GraphQuery(
-            /*Interconnects:*/  listOf("INT_R_X41Y61"),
-            /*Classes:*/        EnumSet.allOf(PJClass::class.java),
-            /*Excludes:*/       listOf(GRJunctionType(GlobalRouteDir.UNCLASSIFIED, PJType.UNCLASSIFIED))
-    )
-    )
+    if(false) {
+        sbs.scrapeWithFunc(GraphQuery(
+                /*Interconnects:*/  listOf("INT_R_X41Y60", "INT_R_X41Y61"),
+                /*Classes:*/        EnumSet.allOf(PJClass::class.java),
+                /*Excludes:*/       listOf()
+        ), ::analyzeWireLength
+        )
 
-    sbs.scrape(GraphQuery(
-            /*Interconnects:*/  listOf("INT_R_X41Y61"),
-            /*Classes:*/        EnumSet.allOf(PJClass::class.java),
-            /*Excludes:*/       listOf()
-    )
-    )
+        sbs.scrape(GraphQuery(
+                /*Interconnects:*/  listOf("INT_R_X41Y61"),
+                /*Classes:*/        EnumSet.allOf(PJClass::class.java),
+                /*Excludes:*/       listOf(GRJunctionType(GlobalRouteDir.UNCLASSIFIED, PJType.UNCLASSIFIED))
+        )
+        )
 
-    sbs.scrape(GraphQuery(
-            /*Interconnects:*/  listOf("INT_R_X41Y61", "INT_L_X40Y61"),
-            /*Classes:*/        EnumSet.allOf(PJClass::class.java),
-            /*Excludes:*/       listOf(GRJunctionType(GlobalRouteDir.UNCLASSIFIED, PJType.UNCLASSIFIED))
-    )
-    )
+        sbs.scrape(GraphQuery(
+                /*Interconnects:*/  listOf("INT_R_X41Y61"),
+                /*Classes:*/        EnumSet.allOf(PJClass::class.java),
+                /*Excludes:*/       listOf()
+        )
+        )
 
-    return
+        sbs.scrape(GraphQuery(
+                /*Interconnects:*/  listOf("INT_R_X41Y61", "INT_L_X40Y61"),
+                /*Classes:*/        EnumSet.allOf(PJClass::class.java),
+                /*Excludes:*/       listOf(GRJunctionType(GlobalRouteDir.UNCLASSIFIED, PJType.UNCLASSIFIED))
+        )
+        )
 
+        return
+    }
 }
