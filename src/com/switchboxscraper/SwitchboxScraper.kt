@@ -365,23 +365,33 @@ fun countClusters(gq: GraphQuery, ss: SwitchboxScraper) {
  * For each global routing direction, counts the number of wires of each length type
  */
 fun analyzeWireLength(gq: GraphQuery, ss: SwitchboxScraper) {
-    val interconnect = ss.interconnects[0]
+    var mapForIC = mutableMapOf<String, MutableMap<Point, Int>>()
+    for (interconnect in ss.interconnects) {
+        /**
+         * The direction map will contain the count of wires for each possible XY wire length available
+         */
+        var directionMap = mutableMapOf<Point, Int>()
 
-    /**
-     * The direction map will contain the count of wires for each possible XY wire length available
-     */
-    var directionMap = mutableMapOf<Point, Int>()
+        for (wire in interconnect.globalPipJunctions) {
+            val direction = interconnect.wireSpan(wire)
+            if(direction == null)
+                continue
 
-    for(wire in interconnect.globalPipJunctions) {
-        val direction = interconnect.wireSpan(wire)
-        if(!directionMap.containsKey(direction))
-            directionMap[direction] = 0
+            if (!directionMap.containsKey(direction))
+                directionMap[direction] = 0
 
-        directionMap[direction] = directionMap[direction]!! + 1
+            directionMap[direction] = directionMap[direction]!! + 1
+        }
+        mapForIC[interconnect.name] = directionMap
     }
 
-    // Dump to file
-    File("test.json").writeText(JSONObject(directionMap).toString())
+    val title = ss.interconnects.fold(mutableListOf<String>()){ acc, it -> acc.add(it.name);
+        acc
+    }.joinToString(separator="_")
+
+
+            // Dump to file
+        File(title + "_wiredump.json").writeText(JSONObject(mapForIC).toString())
 }
 
 fun main(args: Array<String>) {
@@ -389,7 +399,7 @@ fun main(args: Array<String>) {
 
     // Get a cluster count for each connection type
     sbs.scrapeWithFunc(GraphQuery(
-            /*Interconnects:*/  listOf("INT_R_X41Y60"),
+            /*Interconnects:*/  listOf("INT_R_X23Y109","INT_L_X22Y109"),
             /*Classes:*/        EnumSet.allOf(PJClass::class.java),
             /*Excludes:*/       listOf()
     ), ::analyzeWireLength
