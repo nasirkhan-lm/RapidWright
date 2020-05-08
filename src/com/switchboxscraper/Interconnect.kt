@@ -94,23 +94,7 @@ class Interconnect(tile: Tile) {
         // (for BEG junctions) are located in this tile, or in an external tile
         for(wire in pipJunctions){
             val node = wire.node
-            var candidateExternalTile: Tile? = null
-
-            // Check if a global routing wire TERMINATES in this switchbox
-            if (node.tile != tile) {
-                // the node of the wire has its base wire in a tile that is not this tile; hence it must be a global wire
-                candidateExternalTile = node.tile
-            }
-            // Check if this wire is the START of a global routing wire
-            else {
-
-                for (nodeWire in node.allWiresInNode) {
-                    if (nodeWire.tile != tile) {
-                        candidateExternalTile = nodeWire.tile
-                        break
-                    }
-                }
-            }
+            var candidateExternalTile = getExternalTile(wire)
 
             if (candidateExternalTile != null) {
                 // Are we logically still on the same tile? This would be the case if the node terminated in ie. the CLB
@@ -133,28 +117,55 @@ class Interconnect(tile: Tile) {
      */
     fun getExternalTile(wire : Wire): Tile? {
         var node = wire.node
-        var externalTile : Tile? = null
+        var externalTile: Tile? = null
         if (wire.startWire == wire) {
 
-            if(node.allDownhillPIPs.isEmpty())
+            if (node.allDownhillPIPs.isEmpty())
                 println("?")
 
             // This is a source wire. Identify sink wires by iterating over the downhill PIPs and sanity checking that
             // they all terminate in the same tile. The downhill PIPs corresponds to the *outputs* within the pip
             // junction of the *end* switchbox which this wire connects to
-            externalTile = node.allDownhillPIPs[0].tile
 
-            // Sanity check that all of the downhill pips are in the same tile
-            val pipsInSameTile = node.allDownhillPIPs.fold(true){inSameTile, pip -> inSameTile && (pip.tile == tile)}
+            // Filter any pips which are located in the current tile. These may be bounces into the tile
+            var externalPips = node.allDownhillPIPs.filter { it.tile != tile }
 
-            if(!pipsInSameTile){
-                println("Wire ${wire.toString()} fanned out to pips located in different tiles!")
+            if(externalPips.isEmpty())
+                return null // Cannot be an external tile; all pips are internal (possibly a FAN wire)
+
+            // Get a candidate external tile which we check others against
+            externalTile = externalPips[0].tile
+
+            // Next, we want to ensure that all other downhill pips are located in the same external tile
+            val pipsInSameTile = externalPips.all { it.tile == externalTile }
+
+            if (wire.wireName.contains("NL1BEG0")) {
+                // println("")
+            }
+
+            if (!pipsInSameTile) {
+                println("Wire ${wire.toString()} fanned out to pips located in different external tiles!")
+                for (pip in externalPips) {
+                    if (tile.getTileManhattanDistance(pip.tile) > tile.getTileManhattanDistance(externalTile)) {
+                        externalTile = pip.tile
+                    }
+                }
+                println("Selected tile furthest away: ${externalTile!!.name}\n")
             }
 
         } else {
             // This is a sink wire. The source wire will be the base wire of the associated node
             externalTile = node.tile
         }
+
+        if (externalTile == this.tile){
+            // This implies that both sourc and sink of the wire was within the current tile.
+            // In this case - even if the wires appears in the global routing network, we ignore the connection.
+            // (Where ignoring implies that we count the wire as being part of the internal routing network of the
+            // switchbox).
+            return null
+        }
+
         return externalTile
     }
 
@@ -182,13 +193,13 @@ class Interconnect(tile: Tile) {
         }
     }
 
-    fun wireLength(wire : Wire): Int {
-        val externalTile = getExternalTile(wire) ?: throw Exception()
+    fun wireLength(wire : Wire): Int? {
+        val externalTile = getExternalTile(wire) ?: return null
         return tile.getTileManhattanDistance(externalTile)
     }
 
-    fun wireSpan(wire : Wire): Point {
-        val externalTile = getExternalTile(wire) ?: throw Exception()
+    fun wireSpan(wire : Wire): Point? {
+        val externalTile = getExternalTile(wire) ?: return null
         val p1 = Point(tile.tileXCoordinate, tile.tileYCoordinate)
         val p2 = Point(externalTile.tileXCoordinate, externalTile.tileYCoordinate)
 
