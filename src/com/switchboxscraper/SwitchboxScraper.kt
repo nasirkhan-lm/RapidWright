@@ -57,9 +57,9 @@ class SwitchboxScraper(deviceName: String) {
     /**
      * Scrapes the switchbox and executes some user-defined function as a query
      */
-    fun scrapeWithFunc(query : GraphQuery, f : (gq: GraphQuery, ss: SwitchboxScraper) -> Unit) {
+    fun scrapeWithFunc(query : GraphQuery, f : (gq: GraphQuery, ss: SwitchboxScraper, options : Map<String, Boolean>) -> Unit,  options : Map<String, Boolean> ) {
         query.tiles.map { name -> println("Scraping Switchbox: ${name}");interconnects.add(Interconnect(device.getTile(name))) }
-        f(query, this)
+        f(query, this, options)
     }
 
     fun scrape(query: GraphQuery) {
@@ -301,7 +301,7 @@ class SwitchboxScraper(deviceName: String) {
     }
 }
 
-fun compareSwitchboxes(gq: GraphQuery, ss: SwitchboxScraper) {
+fun compareSwitchboxes(gq: GraphQuery, ss: SwitchboxScraper, options : Map<String, Boolean>) {
     val sb1 = ss.interconnects[0]
     val sb2 = ss.interconnects[1]
 
@@ -318,7 +318,7 @@ fun compareSwitchboxes(gq: GraphQuery, ss: SwitchboxScraper) {
     }
 }
 
-fun countClusters(gq: GraphQuery, ss: SwitchboxScraper) {
+fun countClusters(gq: GraphQuery, ss: SwitchboxScraper, options : Map<String, Boolean>) {
     var wirenames = ss.interconnects[0].pipJunctions.fold(mutableListOf<String>()){acc, wire -> acc.add(wire.wireName); acc }
 
     wirenames.sort()
@@ -364,7 +364,7 @@ fun countClusters(gq: GraphQuery, ss: SwitchboxScraper) {
 /**
  * For each global routing direction, counts the number of wires of each length type
  */
-fun analyzeWireLength(gq: GraphQuery, ss: SwitchboxScraper) {
+fun analyzeWireLength(gq: GraphQuery, ss: SwitchboxScraper, options : Map<String, Boolean>) {
     var mapForIC = mutableMapOf<String, MutableMap<Point, Int>>()
     for (interconnect in ss.interconnects) {
         /**
@@ -394,14 +394,25 @@ fun analyzeWireLength(gq: GraphQuery, ss: SwitchboxScraper) {
         File(title + "_wiredump.json").writeText(JSONObject(mapForIC).toString())
 }
 
-fun analyzeFanInOut(gq: GraphQuery, ss : SwitchboxScraper) {
+/**
+ * options:
+ *      global : Boolean. If true; analyzes only global pip junctions of switchbox. Else, analyses all pip junctions
+ *                        of the switchbox.
+ */
+fun analyzeFanInOut(gq: GraphQuery, ss : SwitchboxScraper, options : Map<String, Boolean>) {
+    val global = options.containsKey("global") and options["global"]!!
     var mapForIC = mutableMapOf<String, MutableMap<PJType, MutableMap<String, Int>>>()
     for (interconnect in ss.interconnects) {
         mapForIC[interconnect.name] = mutableMapOf<PJType, MutableMap<String, Int>>()
         mapForIC[interconnect.name]!![PJType.SOURCE] = mutableMapOf<String, Int>()
         mapForIC[interconnect.name]!![PJType.SINK] = mutableMapOf<String, Int>()
 
-        for (pj in interconnect.pipJunctions){
+        var junctionsToAnalyze = interconnect.pipJunctions
+        if(global) {
+            junctionsToAnalyze = interconnect.globalPipJunctions
+        }
+
+        for (pj in junctionsToAnalyze){
             val prop = interconnect.pjClassification[pj]
             if(prop == null)
                 continue
@@ -424,20 +435,32 @@ fun analyzeFanInOut(gq: GraphQuery, ss : SwitchboxScraper) {
         acc
     }.joinToString(separator="_")
 
+    var typeStr = ""
+    if(global) {
+        typeStr = "global"
+    } else {
+        typeStr = "all"
+    }
 
     // Dump to file
-    File(title + "_faniodump.json").writeText(JSONObject(mapForIC).toString())
+    File(title + "_faniodump_${typeStr}.json").writeText(JSONObject(mapForIC).toString())
 }
 
 
-fun main(args: Array<String>) {
-    var sbs = SwitchboxScraper("xc7a35t")
 
+
+
+// ============================================================================
+// List of predefined analysis'
+
+fun analyzePairedSbFanIO() {
+    var sbs = SwitchboxScraper("xc7a35t")
     sbs.scrapeWithFunc(GraphQuery(
             /*Interconnects:*/  listOf("INT_R_X23Y109","INT_L_X22Y109"),
             /*Classes:*/        EnumSet.allOf(PJClass::class.java),
             /*Excludes:*/       listOf()
-    ), ::analyzeWireLength
+    ), ::analyzeFanInOut,
+            mapOf("global" to true)
     )
 
     sbs = SwitchboxScraper("xc7a35t")
@@ -445,17 +468,41 @@ fun main(args: Array<String>) {
             /*Interconnects:*/  listOf("INT_R_X23Y109","INT_L_X22Y109"),
             /*Classes:*/        EnumSet.allOf(PJClass::class.java),
             /*Excludes:*/       listOf()
-    ), ::analyzeFanInOut
+    ), ::analyzeFanInOut,
+            mapOf("global" to false)
     )
+}
+
+
+fun analyzePairedSbWireLength() {
+    var sbs = SwitchboxScraper("xc7a35t")
+
+    sbs.scrapeWithFunc(GraphQuery(
+            /*Interconnects:*/  listOf("INT_R_X23Y109","INT_L_X22Y109"),
+            /*Classes:*/        EnumSet.allOf(PJClass::class.java),
+            /*Excludes:*/       listOf()
+    ), ::analyzeWireLength,
+            mapOf()
+    )
+}
+
+// ============================================================================
+
+fun main(args: Array<String>) {
+    analyzePairedSbFanIO()
+    analyzePairedSbWireLength()
+
 
     return
 
+    var sbs = SwitchboxScraper("xc7a35t")
     // Compare name equality of two switchboxes. The following two connects to 1: a BRAM and 2: a CLB
     sbs.scrapeWithFunc(GraphQuery(
             /*Interconnects:*/  listOf("INT_R_X41Y60", "INT_R_X37Y22"),
             /*Classes:*/        EnumSet.allOf(PJClass::class.java),
             /*Excludes:*/       listOf()
-    ), ::compareSwitchboxes
+    ), ::compareSwitchboxes,
+            mapOf()
     )
 
     if(false) {
@@ -463,7 +510,8 @@ fun main(args: Array<String>) {
                 /*Interconnects:*/  listOf("INT_R_X41Y60", "INT_R_X41Y61"),
                 /*Classes:*/        EnumSet.allOf(PJClass::class.java),
                 /*Excludes:*/       listOf()
-        ), ::analyzeWireLength
+        ), ::analyzeWireLength,
+                mapOf()
         )
 
         sbs.scrape(GraphQuery(
