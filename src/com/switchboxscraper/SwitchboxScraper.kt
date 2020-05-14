@@ -394,15 +394,58 @@ fun analyzeWireLength(gq: GraphQuery, ss: SwitchboxScraper) {
         File(title + "_wiredump.json").writeText(JSONObject(mapForIC).toString())
 }
 
-fun main(args: Array<String>) {
-    val sbs = SwitchboxScraper("xc7a35t")
+fun analyzeFanInOut(gq: GraphQuery, ss : SwitchboxScraper) {
+    var mapForIC = mutableMapOf<String, MutableMap<PJType, MutableMap<String, Int>>>()
+    for (interconnect in ss.interconnects) {
+        mapForIC[interconnect.name] = mutableMapOf<PJType, MutableMap<String, Int>>()
+        mapForIC[interconnect.name]!![PJType.SOURCE] = mutableMapOf<String, Int>()
+        mapForIC[interconnect.name]!![PJType.SINK] = mutableMapOf<String, Int>()
 
-    // Get a cluster count for each connection type
+        for (pj in interconnect.pipJunctions){
+            val prop = interconnect.pjClassification[pj]
+            if(prop == null)
+                continue
+
+            var count = 0
+
+            if(prop.pjType == PJType.SOURCE) {
+                count = pj.forwardPIPs.size
+            } else if(prop.pjType == PJType.SINK) {
+                count = pj.backwardPIPs.size
+            } else {
+                continue
+            }
+
+            mapForIC[interconnect.name]!![prop.pjType]!![pj.wireName] = count
+        }
+    }
+
+    val title = ss.interconnects.fold(mutableListOf<String>()){ acc, it -> acc.add(it.name);
+        acc
+    }.joinToString(separator="_")
+
+
+    // Dump to file
+    File(title + "_faniodump.json").writeText(JSONObject(mapForIC).toString())
+}
+
+
+fun main(args: Array<String>) {
+    var sbs = SwitchboxScraper("xc7a35t")
+
     sbs.scrapeWithFunc(GraphQuery(
             /*Interconnects:*/  listOf("INT_R_X23Y109","INT_L_X22Y109"),
             /*Classes:*/        EnumSet.allOf(PJClass::class.java),
             /*Excludes:*/       listOf()
     ), ::analyzeWireLength
+    )
+
+    sbs = SwitchboxScraper("xc7a35t")
+    sbs.scrapeWithFunc(GraphQuery(
+            /*Interconnects:*/  listOf("INT_R_X23Y109","INT_L_X22Y109"),
+            /*Classes:*/        EnumSet.allOf(PJClass::class.java),
+            /*Excludes:*/       listOf()
+    ), ::analyzeFanInOut
     )
 
     return
