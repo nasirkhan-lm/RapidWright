@@ -447,7 +447,100 @@ fun analyzeFanInOut(gq: GraphQuery, ss : SwitchboxScraper, options : Map<String,
 }
 
 
+fun analyzeConnectivityAdjacencyClustered(gq: GraphQuery, ss : SwitchboxScraper, options : Map<String, Boolean>) {
+    val global = options.containsKey("global") and options["global"]!!
 
+    // Map: { interconnect : { pip junction : [pip junctions] } }
+    var mapForIC = mutableMapOf<String, MutableMap<String, MutableList<String>>>()
+
+    for (interconnect in ss.interconnects) {
+        mapForIC[interconnect.name] = mutableMapOf()
+        var queryRes = interconnect.processQuery(gq)
+
+        for( conn  in queryRes.clusterResult.connections) {
+            if(!mapForIC[interconnect.name]!!.containsKey(conn.toString())){
+                mapForIC[interconnect.name]!![conn.key.toString()] = mutableListOf()
+            }
+
+            mapForIC[interconnect.name]!![conn.key.toString()] = conn.value.toList().fold(mutableListOf<String>()){acc, it -> acc.add(it.toString()); acc}
+        }
+
+        continue
+    }
+
+    val title = ss.interconnects.fold(mutableListOf<String>()){ acc, it -> acc.add(it.name);
+        acc
+    }.joinToString(separator="_")
+
+    var typeStr = ""
+    if(global) {
+        typeStr = "global"
+    } else {
+        typeStr = "all"
+    }
+
+    // Dump to file
+    File(title + "_adjacencydump_${typeStr}.json").writeText(JSONObject(mapForIC).toString())
+
+
+}
+
+/**
+ * Returns an adjacency list representation of the pip junctions within the switchbox
+ */
+fun analyzeConnectivityAdjacency(gq: GraphQuery, ss : SwitchboxScraper, options : Map<String, Boolean>) {
+    val global = options.containsKey("global") and options["global"]!!
+
+    // Map: { interconnect : { pip junction : [pip junctions] } }
+    var mapForIC = mutableMapOf<String, MutableMap<String, MutableList<String>>>()
+    for (interconnect in ss.interconnects) {
+        mapForIC[interconnect.name] = mutableMapOf<String, MutableList<String>>()
+
+        var junctionsToAnalyze = interconnect.pipJunctions
+        if(global) {
+            junctionsToAnalyze = interconnect.globalPipJunctions
+        }
+
+        for (pj in junctionsToAnalyze){
+            val prop = interconnect.pjClassification[pj]
+            if(prop == null)
+                continue
+
+            var count = 0
+
+            var connectsToPips = mutableListOf<String>()
+            if(prop.pjType == PJType.SOURCE) {
+                connectsToPips = pj.forwardPIPs.fold(mutableListOf<String>()) { acc, it -> acc.add(it.endWireName); acc }
+            } else if(prop.pjType == PJType.SINK) {
+                connectsToPips = pj.backwardPIPs.fold(mutableListOf<String>()) { acc, it -> acc.add(it.startWireName); acc }
+            } else {
+                continue
+            }
+
+            // @todo: must filter out pips which are not in junctionsToAnalyze
+
+            if(!mapForIC[interconnect.name]!!.containsKey(pj.wireName)){
+                mapForIC[interconnect.name]!![pj.wireName] = mutableListOf()
+            }
+
+            mapForIC[interconnect.name]!![pj.wireName] = connectsToPips
+        }
+    }
+
+    val title = ss.interconnects.fold(mutableListOf<String>()){ acc, it -> acc.add(it.name);
+        acc
+    }.joinToString(separator="_")
+
+    var typeStr = ""
+    if(global) {
+        typeStr = "global"
+    } else {
+        typeStr = "all"
+    }
+
+    // Dump to file
+    File(title + "_adjacencydump_${typeStr}.json").writeText(JSONObject(mapForIC).toString())
+}
 
 
 // ============================================================================
@@ -473,6 +566,26 @@ fun analyzePairedSbFanIO() {
     )
 }
 
+fun analyzePairedSbAdjacency() {
+    var sbs = SwitchboxScraper("xc7a35t")
+    sbs.scrapeWithFunc(GraphQuery(
+            /*Interconnects:*/  listOf("INT_R_X23Y109","INT_L_X22Y109"),
+            /*Classes:*/        EnumSet.allOf(PJClass::class.java),
+            /*Excludes:*/       listOf()
+    ), ::analyzeConnectivityAdjacency,
+            mapOf("global" to true)
+    )
+
+    sbs = SwitchboxScraper("xc7a35t")
+    sbs.scrapeWithFunc(GraphQuery(
+            /*Interconnects:*/  listOf("INT_R_X23Y109","INT_L_X22Y109"),
+            /*Classes:*/        EnumSet.allOf(PJClass::class.java),
+            /*Excludes:*/       listOf()
+    ), ::analyzeConnectivityAdjacencyClustered,
+            mapOf("global" to true)
+    )
+}
+
 
 fun analyzePairedSbWireLength() {
     var sbs = SwitchboxScraper("xc7a35t")
@@ -491,6 +604,7 @@ fun analyzePairedSbWireLength() {
 fun main(args: Array<String>) {
     analyzePairedSbFanIO()
     analyzePairedSbWireLength()
+    analyzePairedSbAdjacency()
 
 
     return

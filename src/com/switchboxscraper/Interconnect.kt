@@ -26,7 +26,9 @@ enum class PJRoutingType {
 }
 
 enum class GlobalRouteDir { EE, WW, SS, NN, NE, NW, SE, SW, SR, SL, EL, ER, WL, WR, NL, NR, UNCLASSIFIED }
-data class GRJunctionType(val dir: GlobalRouteDir, val type: PJType)
+data class GRJunctionType(val dir: GlobalRouteDir, val type: PJType) {
+    override fun toString(): String = dir.toString() + type.toString()
+}
 data class PJProperty(val pjClass: PJClass, val pjType: PJType, val routingType: PJRoutingType)
 
 data class Point(val x : Int, val y : Int)
