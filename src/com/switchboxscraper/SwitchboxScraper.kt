@@ -599,9 +599,41 @@ fun analyzePairedSbWireLength() {
     )
 }
 
+fun dumpNutLengthFunctor(gq: GraphQuery, ss : SwitchboxScraper, options : Map<String, Boolean>) {
+    var mapForIC = mutableMapOf<String, MutableMap<String, MutableList<String>>>()
+
+    var nuts = JSONObject()
+    for (interconnect in ss.interconnects) {
+        val nut = interconnect.dumpToNutcracker()
+        nuts.put(interconnect.name, nut)
+    }
+
+    val title = ss.interconnects.fold(mutableListOf<String>()) { acc, it ->
+        acc.add(it.name);
+        acc
+    }.joinToString(separator = "_")
+
+
+    File(title + "_nutdata.json").writeText(nuts.toString(4))
+}
+
+fun dumpNutLength(){
+    var sbs = SwitchboxScraper("xc7a35t")
+
+    sbs.scrapeWithFunc(GraphQuery(
+            /*Interconnects:*/  listOf("INT_R_X21Y125","INT_L_X20Y125"),
+            /*Classes:*/        EnumSet.allOf(PJClass::class.java),
+            /*Excludes:*/       listOf()
+    ), ::dumpNutLengthFunctor,
+            mapOf()
+    )
+
+}
+
 // ============================================================================
 
 fun main(args: Array<String>) {
+    dumpNutLength()
     analyzePairedSbFanIO()
     analyzePairedSbWireLength()
     analyzePairedSbAdjacency()
